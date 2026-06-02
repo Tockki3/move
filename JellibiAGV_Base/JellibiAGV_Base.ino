@@ -159,6 +159,10 @@ bool  allTargetsFinished = false;
 // 장애물 안전 정지 래치
 bool obstacleHalt = false;
 
+// 버튼 출발/정지 (A3)
+bool running = false;   // 버튼으로 토글 (false = 출발 대기 / 일시정지)
+bool started = false;   // 시퀀스 최초 시작 여부
+
 // 비차단 부저
 bool isBeepPlaying = false;
 unsigned long beepEndTime = 0;
@@ -561,7 +565,32 @@ void DebugPrint() {
 }
 
 //==============================================================
-// 18. setup / loop
+// 18. 버튼 출발/정지 (A3, 액티브 로우, INPUT 외부풀업)
+//==============================================================
+void handleStartButton() {
+  if (digitalRead(pinButton) != 0) return;        // 안 눌림
+  Stop();                                          // 눌리는 순간 안전 정지
+  delay(20);                                       // 디바운스
+  if (digitalRead(pinButton) != 0) return;         // 채터링 무시
+  while (digitalRead(pinButton) == 0) delay(5);    // 손 뗄 때까지 대기
+
+  running = !running;                              // 토글
+  if (running) {
+    if (!started) {                                // 최초 1회: 시퀀스 시작
+      started = true;
+      if (RUN_MODE == MODE_TEST_MOVE) StartCurrentTarget();
+    }
+    Serial.println(F(">> START"));
+    BeepNonBlocking(880, 120);
+  } else {                                         // 다시 누르면 정지(비상정지)
+    Stop();
+    Serial.println(F(">> STOP"));
+    BeepNonBlocking(300, 200);
+  }
+}
+
+//==============================================================
+// 19. setup / loop
 //==============================================================
 void setup() {
   Serial.begin(9600);
@@ -581,17 +610,18 @@ void setup() {
   robotPos = START;
   robotDir = START_DIR;
 
-  delay(1000);
+  delay(300);
   BeepNonBlocking(523, 150);
-  Serial.println("Jellibi AGV Base Start");
-
-  if (RUN_MODE == MODE_TEST_MOVE) StartCurrentTarget();
+  Serial.println(F("Jellibi AGV Base - 버튼(A3)을 누르면 출발"));
+  // 버튼 출발: setup에서 자동 시작하지 않음 (loop의 handleStartButton)
 }
 
 void loop() {
   UpdateBuzzer();
   DebugPrint();
+  handleStartButton();                    // 버튼으로 출발/정지 토글
 
+  if (!running)     { Stop(); return; }   // 출발 대기 / 일시정지
   if (obstacleHalt) { Stop(); return; }   // 장애물 안전 정지 래치
 
   if (RUN_MODE == MODE_TEST_MOVE) RunMoveTo();
