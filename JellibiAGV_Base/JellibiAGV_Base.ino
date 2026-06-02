@@ -12,7 +12,7 @@
  *   RFID UID(8·12) · 리프트 서보(9·10) · 경계 안전 회피 모션(17·18) · 미션 시퀀서(19)
  *
  * [사용법]
- *   - 맵: ROW/COL 경계, START, WAREHOUSE, CITY[] 좌표를 실제 맵에 맞게 수정
+ *   - 맵: START/START_DIR/HUB, cityTable UID를 대회 맵·공지에 맞게 수정
  *   - 실행 모드: RUN_MODE 로 전환 (기본 = 검증된 targetList 주행)
  ****************************************************************/
 
@@ -90,19 +90,35 @@ struct Point { int row; int col; };
 
 enum Direction { NORTH = 0, EAST = 1, SOUTH = 2, WEST = 3 };
 
-// --- 격자 경계 (실제 맵 크기에 맞게 수정) ---
+// --- 좌표 모델 (WCRC: 8×8 격자 + 사방 격자 밖 T스텁) ---
+//   행: row0=창고줄(위), row1~8=격자 A~H, row9=도시줄(아래)
+//   열: col0=좌측출발, col1~8=격자 열1~8, col9=우측출발
+//   격자 내부(행1~8 × 열1~8)만 사방 연속. 스텁줄은 게이트(한 점)로만 연결.
 #define ROW_MIN 0
 #define ROW_MAX 9
 #define COL_MIN 0
-#define COL_MAX 4
+#define COL_MAX 9
+#define GRID_ROW_MIN 1   // 행 A
+#define GRID_ROW_MAX 8   // 행 H
+#define GRID_COL_MIN 1   // 열 1
+#define GRID_COL_MAX 8   // 열 8
 
-// --- 고정 지점 (실제 맵에 맞게 수정) ---
-Point     START     = {7, 0};
-Direction START_DIR = EAST;
-Point     WAREHOUSE = {0, 0};            // TODO: 상차 지점 좌표
-Point     CITY[4]   = { {0,1},{0,2},{0,3},{0,4} }; // TODO: 도시 좌표
+// --- 창고(row0, 열1~8) / 도시(row9, 열1~8) ---
+enum City { SEOUL, INCHEON, SEJONG, DAEJEON, DAEGU, GWANGJU, BUSAN, JEJU, CITY_COUNT };
+Point cityPos[CITY_COUNT] = {       // 서울~제주 = 열1~8
+  {9,1},{9,2},{9,3},{9,4},{9,5},{9,6},{9,7},{9,8}
+};
+Point warehousePos[8] = {           // 창고1~8 = 열1~8
+  {0,1},{0,2},{0,3},{0,4},{0,5},{0,6},{0,7},{0,8}
+};
 
-Point     robotPos = {7, 0};
+// --- 출발지 / 허브 창고 (※ 대회 시작 시 공지된 값으로 수정) ---
+// 출발지는 좌측(열0)·우측(열9) 또는 창고/도시 스텁 어디든 가능
+Point     START     = {1, 0};    // TODO: 공지된 출발 (예: 1A 왼쪽 = (1,0))
+Direction START_DIR = EAST;      // TODO: 출발 향(좌=EAST, 우=WEST, 창고=SOUTH, 도시=NORTH)
+Point     HUB       = {0, 1};    // TODO: 상차 허브 창고 (예: 창고1 = (0,1))
+
+Point     robotPos = {1, 0};
 Direction robotDir = EAST;
 
 bool inBounds(Point p) {
@@ -150,9 +166,15 @@ bool isLineTraceFinished = false;
 int   moveState = 0;
 Point currentTarget;
 
-// 다중 목표 (기본 검증용 주행)
-Point targetList[] = { {7,3}, {4,3}, {4,1} };
+// 테스트 목적지 (스텁 라우팅 검증) — START=(1,0) 좌측출발 가정
+// 창고1(0,1) → 제주(9,8) → 창고4(0,4)
+Point targetList[] = { {0,1}, {9,8}, {0,4} };
 int   targetCount  = 3;
+
+// 스텁 안전 라우팅: 목적지까지 웨이포인트 (세로→가로→세로, 최대 4점)
+Point routeWP[4];
+int   routeLen = 0;
+int   routeIdx = 0;
 int   targetIndex  = 0;
 bool  allTargetsFinished = false;
 
@@ -363,6 +385,38 @@ void StartMoveTo(Point target) {
 void UpdatePositionForward(int cells) {
   robotPos = stepCell(robotPos, robotDir, cells);
 }
+
+// 두 점이 같은가
+bool samePoint(Point a, Point b) { return a.row == b.row && a.col == b.col; }
+
+// 스텁(창고/도시/좌우출발)의 격자 진입점(게이트)
+Point gateway(Point p) {
+  Point g = p;
+  if      (p.row == ROW_MIN) g.row = GRID_ROW_MIN;   // 창고(위)  → 아래로
+  else if (p.row == ROW_MAX) g.row = GRID_ROW_MAX;   // 도시(아래)→ 위로
+  else if (p.col == COL_MIN) g.col = GRID_COL_MIN;   // 좌측출발  → 오른쪽
+  else if (p.col == COL_MAX) g.col = GRID_COL_MAX;   // 우측출발  → 왼쪽
+  return g;                                          // 격자 내부면 그대로
+}
+
+// from→to 분해: [스텁 진입] → 격자 이동 → [스텁 탈출]
+// 격자 내부는 사방 연속이라 MoveTo(행→열)가 한 번에 처리
+int planRoute(Point from, Point to, Point wp[]) {
+  int n = 0;
+  wp[n++] = from;
+  Point gA = gateway(from);
+  Point gB = gateway(to);
+  if (!samePoint(gA, from)) wp[n++] = gA;   // 스텁 진입(게이트)
+  if (!samePoint(gB, gA))   wp[n++] = gB;   // 격자 내부 이동
+  if (!samePoint(to, gB))   wp[n++] = to;   // 스텁 탈출
+  return n;
+}
+void StartGoTo(Point dest) {
+  routeLen = planRoute(robotPos, dest, routeWP);
+  routeIdx = 1;                                // wp[0] = 현재 위치
+  if (routeIdx < routeLen) StartMoveTo(routeWP[routeIdx]);
+  else moveState = 5;                          // 이미 도착(같은 칸) → 다음으로
+}
 void RunMoveTo() {
   if (allTargetsFinished) { Stop(); return; }
 
@@ -402,10 +456,12 @@ void RunMoveTo() {
       isLineTraceFinished = false; ResetLineCounter(); moveState = 0;
     }
   }
-  // 5. 도착
+  // 5. (웨이포인트) 도착
   else if (moveState == 5) {
     Stop(); moveState = 0;
-    FinishAndStartNextTarget();
+    routeIdx++;
+    if (routeIdx < routeLen) StartMoveTo(routeWP[routeIdx]); // 다음 웨이포인트
+    else                     FinishAndStartNextTarget();     // 최종 목적지 도착
   }
 }
 
@@ -416,7 +472,7 @@ void StartCurrentTarget() {
   if (targetIndex >= targetCount) {
     allTargetsFinished = true; Stop(); BeepNonBlocking(1500, 500); return;
   }
-  StartMoveTo(targetList[targetIndex]);
+  StartGoTo(targetList[targetIndex]);
 }
 void FinishAndStartNextTarget() {
   targetIndex++;
@@ -472,20 +528,29 @@ void handleObstacle() {
 //==============================================================
 // ---- RFID (목차 8·12) ----  D2(SS)/D4(RST)/SPI, MFRC522 권장
 struct CityTag { byte uid[4]; Point pos; };
-CityTag cityTable[5] = {
-  // TODO: { {0x.., .., .., ..}, {row,col} },  // 도시별 UID→좌표
+// 각 도시 태그 UID를 RfidTest로 읽어 채우세요 (좌표 = cityPos)
+CityTag cityTable[CITY_COUNT] = {
+  { {0,0,0,0}, {9,1} },  // SEOUL   서울
+  { {0,0,0,0}, {9,2} },  // INCHEON 인천
+  { {0,0,0,0}, {9,3} },  // SEJONG  세종
+  { {0,0,0,0}, {9,4} },  // DAEJEON 대전
+  { {0,0,0,0}, {9,5} },  // DAEGU   대구
+  { {0,0,0,0}, {9,6} },  // GWANGJU 광주
+  { {0,0,0,0}, {9,7} },  // BUSAN   부산
+  { {0,0,0,0}, {9,8} },  // JEJU    제주
 };
+// 읽은 태그 {0x03,0x04,0x8C,0xE2} → 어느 도시인지 확인 후 해당 줄 uid에 입력
 bool readUID(byte *uid) {
   // TODO: RFID 모듈에서 UID 읽기. 읽으면 true.
   return false;
 }
 Point lookupCity(byte *uid) {
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < CITY_COUNT; i++) {
     bool eq = true;
     for (int b = 0; b < 4; b++) if (cityTable[i].uid[b] != uid[b]) eq = false;
     if (eq) return cityTable[i].pos;
   }
-  return WAREHOUSE; // 미매칭 시 기본값
+  return HUB; // 미매칭 시 기본값(허브 창고)
 }
 
 // ---- 리프트 (목차 9·10) ----  D9 서보
@@ -512,7 +577,7 @@ void RunMission() {
       break;
     }
     case M_TO_WAREHOUSE:
-      // TODO: StartMoveTo(WAREHOUSE) 후 RunMoveTo 완료까지 진행 → M_LOAD
+      // TODO: StartGoTo(HUB) 후 RunMoveTo 완료까지 진행 → M_LOAD
       break;
     case M_LOAD:
       liftUp(); mState = M_TO_CITY;
