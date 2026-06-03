@@ -272,8 +272,11 @@ void ResetLineCounter() {
   lastLineCountTime = 0; leaveConfirmCount = 0;
 }
 void StartIgnoreCrossAfterTurn() {
-  ignoreCrossUntil = millis() + turnIgnoreTime;
-  ResetLineCounter();
+  // 회전 직후: 시간으로 막지 않고, 회전점 교차로를 '잠금'으로 시작한다.
+  // → 그 교차로를 벗어나는 즉시, 다음 교차로가 아무리 빨리 와도 인식한다.
+  ResetLineCounter();      // lineCounter=0, lastLineCountTime=0 (시간 디바운스 즉시 통과)
+  lineLock = true;         // 회전점 교차로는 세지 않음 (벗어나야 카운트 재개)
+  ignoreCrossUntil = 0;    // 시간 기반 블랭킹 제거 (turnIgnoreTime 미사용)
 }
 void UpdateLineCounter() {
   if (millis() < ignoreCrossUntil) return;
