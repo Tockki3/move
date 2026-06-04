@@ -87,6 +87,9 @@ int forwardAfterHalfTurnTime = 60;
 // 도착 교차점 중앙정렬
 int arriveCrossForwardTime = 60;
 
+// 행동마다 멈춤 시간(ms) — 약 1초 (0으로 두면 끔)
+int actionDelayMs = 1000;
+
 // 회전 직후 교차점 무시
 int turnIgnoreTime = 400;
 
@@ -541,7 +544,9 @@ void RunMoveTo() {
   }
   // 5. (웨이포인트) 도착
   else if (moveState == 5) {
-    Stop(); moveState = 0;
+    Stop();
+    delay(actionDelayMs);                                    // 다음 행동 전 약 1초 멈춤
+    moveState = 0;
     routeIdx++;
     if (routeIdx < routeLen) StartMoveTo(routeWP[routeIdx]); // 다음 웨이포인트
     else                     { navActive = false; Stop(); }  // 목적지 도착
@@ -695,14 +700,14 @@ void RunMission() {
       break;                                                         // 없으면 대기
     }
 
-    case M_LIFT_UP:  liftUp();  delay(600); mState = M_GO_CITY1; break;   // 상차
+    case M_LIFT_UP:  liftUp();  delay(actionDelayMs); mState = M_GO_CITY1; break;   // 상차
 
     case M_GO_CITY1: StartGoTo(missionDest); mState = M_GO_CITY2; break;  // 도시로
     case M_GO_CITY2: if (!navActive) { palletGoneCount = 0; dropWaitStart = millis(); mState = M_WAIT_DROP; } break;
 
     case M_WAIT_DROP: if (palletDropped()) { BeepNonBlocking(500, 150); mState = M_LIFT_DOWN; } break;
 
-    case M_LIFT_DOWN: liftDown(); delay(600); mState = M_GO_HUB1; break;  // 하차 → 반복
+    case M_LIFT_DOWN: liftDown(); delay(actionDelayMs); mState = M_GO_HUB1; break;  // 하차 → 반복
   }
 }
 
