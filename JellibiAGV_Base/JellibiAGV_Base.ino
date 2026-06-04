@@ -38,6 +38,18 @@
 // 리프트 서보 예약
 #define pinLiftServo 9
 
+// --- RFID 리더 (RC522 / "MFRC522" 라이브러리 필요) ---
+#include <SPI.h>
+#include <MFRC522.h>
+MFRC522 mfrc522(pinRfidSS, pinRfidRST);
+byte START_CARD[4] = {0x03, 0x04, 0x8C, 0xE2};  // ★ 시작 카드 UID (RfidTest로 확인 후 수정)
+
+// --- 리프트 서보 (D9) ---
+#include <Servo.h>
+Servo liftServo;
+int LIFT_UP_ANGLE   = 90;   // ★ 상차(올림) 각도 (LiftTest로 찾기)
+int LIFT_DOWN_ANGLE = 0;    // ★ 하차(내림) 각도 (LiftTest로 찾기)
+
 //==============================================================
 // 2. 통일 튜닝 상수 (9단계 keeper 채택)
 //==============================================================
@@ -133,7 +145,6 @@ Direction rightOf(Direction d) { return (Direction)((d + 1) % 4); }
 // 전방 선언 (정의보다 먼저 호출되는 함수 — 자동 프로토타입 의존 제거)
 bool CheckObstacle();
 void handleObstacle();
-void FinishAndStartNextTarget();
 
 // p에서 방향 d로 n칸 이동한 좌표
 Point stepCell(Point p, Direction d, int n) {
@@ -175,6 +186,7 @@ int   targetCount  = 3;
 Point routeWP[4];
 int   routeLen = 0;
 int   routeIdx = 0;
+bool  navActive = false;   // 주행(StartGoTo) 진행 중?
 int   targetIndex  = 0;
 bool  allTargetsFinished = false;
 
@@ -415,13 +427,14 @@ int planRoute(Point from, Point to, Point wp[]) {
   return n;
 }
 void StartGoTo(Point dest) {
+  navActive = true;
   routeLen = planRoute(robotPos, dest, routeWP);
   routeIdx = 1;                                // wp[0] = 현재 위치
   if (routeIdx < routeLen) StartMoveTo(routeWP[routeIdx]);
   else moveState = 5;                          // 이미 도착(같은 칸) → 다음으로
 }
 void RunMoveTo() {
-  if (allTargetsFinished) { Stop(); return; }
+  if (!navActive) { Stop(); return; }   // 활성 경로 없으면 정지
 
   // 0. 목표 확인
   if (moveState == 0) {
@@ -464,26 +477,21 @@ void RunMoveTo() {
     Stop(); moveState = 0;
     routeIdx++;
     if (routeIdx < routeLen) StartMoveTo(routeWP[routeIdx]); // 다음 웨이포인트
-    else                     FinishAndStartNextTarget();     // 최종 목적지 도착
+    else                     { navActive = false; Stop(); }  // 목적지 도착
   }
 }
 
 //==============================================================
-// 13. 다중 목표 순차 주행 (기본 검증 모드)
+// 13. 테스트 목적지 순차 주행 (MODE_TEST_MOVE)
 //==============================================================
-void StartCurrentTarget() {
-  if (targetIndex >= targetCount) {
-    allTargetsFinished = true; Stop(); BeepNonBlocking(1500, 500); return;
+void RunTestSequence() {
+  if (navActive) return;                       // 주행 중
+  if (targetIndex >= targetCount) {            // 모두 완료
+    if (!allTargetsFinished) { allTargetsFinished = true; BeepNonBlocking(1500, 500); }
+    Stop(); return;
   }
-  StartGoTo(targetList[targetIndex]);
-}
-void FinishAndStartNextTarget() {
-  targetIndex++;
   delay(300);
-  if (targetIndex >= targetCount) {
-    allTargetsFinished = true; Stop(); BeepNonBlocking(1500, 500); return;
-  }
-  StartCurrentTarget();
+  StartGoTo(targetList[targetIndex++]);        // 다음 목적지
 }
 
 //==============================================================
@@ -544,8 +552,12 @@ CityTag cityTable[CITY_COUNT] = {
 };
 // 읽은 태그 {0x03,0x04,0x8C,0xE2} → 어느 도시인지 확인 후 해당 줄 uid에 입력
 bool readUID(byte *uid) {
-  // TODO: RFID 모듈에서 UID 읽기. 읽으면 true.
-  return false;
+  if (!mfrc522.PICC_IsNewCardPresent()) return false;   // 카드 없음(빠르게 반환)
+  if (!mfrc522.PICC_ReadCardSerial())  return false;
+  for (byte i = 0; i < 4; i++)
+    uid[i] = (i < mfrc522.uid.size) ? mfrc522.uid.uidByte[i] : 0;
+  mfrc522.PICC_HaltA();                                  // 카드 통신 종료
+  return true;
 }
 Point lookupCity(byte *uid) {
   for (int i = 0; i < CITY_COUNT; i++) {
@@ -557,55 +569,80 @@ Point lookupCity(byte *uid) {
 }
 
 // ---- 리프트 (목차 9·10) ----  D9 서보
-void liftUp()   { /* TODO: 서보 상승(상차) */ }
-void liftDown() { /* TODO: 서보 하강(하차) */ }
+void liftUp()   { liftServo.write(LIFT_UP_ANGLE); }     // 상차(올림)
+void liftDown() { liftServo.write(LIFT_DOWN_ANGLE); }   // 하차(내림)
 
 //==============================================================
-// 16. 미션 시퀀서 (목차 19) - 스텁
+// 16. 미션: 출발→창고→팔렛읽기→리프트↑→도시→팔렛분리→리프트↓→창고→반복
 //==============================================================
-enum MissionState { M_IDLE, M_READ_RFID, M_TO_WAREHOUSE, M_LOAD,
-                    M_TO_CITY, M_UNLOAD, M_RETURN, M_DONE };
-MissionState mState = M_IDLE;
+// 팔렛 분리 감지: 0 = 시간경과(테스트/안전 기본), 1 = RFID로 운반중 팔렛 유무
+#define PALLET_DROP_BY_RFID 0
+#define PALLET_WAIT_MS 3000        // (시간 모드) 도시 도착 후 분리 대기 시간
+
+enum MissionState {
+  M_GO_HUB1, M_GO_HUB2,            // 창고로 이동
+  M_READ_PALLET,                   // 팔렛 RFID → 도시 결정
+  M_LIFT_UP,                       // 리프트 올림(상차)
+  M_GO_CITY1, M_GO_CITY2,          // 도시로 이동
+  M_WAIT_DROP,                     // 팔렛 분리 대기
+  M_LIFT_DOWN                      // 리프트 내림 → 창고로(반복)
+};
+MissionState mState = M_GO_HUB1;
 Point missionDest;
+int  palletGoneCount = 0;
+unsigned long dropWaitStart = 0;
+
+#if PALLET_DROP_BY_RFID
+bool palletPresent() {             // 운반 중 팔렛 태그가 리더에 있나
+  byte atqa[2]; byte sz = sizeof(atqa);
+  MFRC522::StatusCode s = mfrc522.PICC_WakeupA(atqa, &sz);
+  bool present = (s == MFRC522::STATUS_OK || s == MFRC522::STATUS_COLLISION);
+  mfrc522.PICC_HaltA();
+  return present;
+}
+#endif
+
+bool palletDropped() {             // 팔렛이 로봇에서 분리됐는가
+#if PALLET_DROP_BY_RFID
+  if (palletPresent()) { palletGoneCount = 0; return false; }
+  return (++palletGoneCount >= 5);                      // 연속 5회 미검출 → 분리
+#else
+  return (millis() - dropWaitStart >= PALLET_WAIT_MS);  // 시간 경과 → 분리 간주
+#endif
+}
 
 void RunMission() {
   switch (mState) {
-    case M_IDLE:
-      mState = M_READ_RFID;
-      break;
-    case M_READ_RFID: {
+    case M_GO_HUB1:  StartGoTo(HUB); mState = M_GO_HUB2; break;       // 창고로
+    case M_GO_HUB2:  if (!navActive) { liftDown(); mState = M_READ_PALLET; } break;
+
+    case M_READ_PALLET: {                                            // 팔렛 읽기
       byte uid[4];
-      if (readUID(uid)) { missionDest = lookupCity(uid); mState = M_TO_WAREHOUSE; }
-      // TODO: 읽기 실패 시 재시도/대기 처리
-      break;
+      if (readUID(uid)) {
+        missionDest = lookupCity(uid);                               // 팔렛 → 도시
+        BeepNonBlocking(1200, 100);
+        mState = M_LIFT_UP;
+      }
+      break;                                                         // 없으면 대기
     }
-    case M_TO_WAREHOUSE:
-      // TODO: StartGoTo(HUB) 후 RunMoveTo 완료까지 진행 → M_LOAD
-      break;
-    case M_LOAD:
-      liftUp(); mState = M_TO_CITY;
-      break;
-    case M_TO_CITY:
-      // TODO: StartMoveTo(missionDest) 진행 → 완료 시 M_UNLOAD
-      break;
-    case M_UNLOAD:
-      liftDown(); mState = M_RETURN;
-      break;
-    case M_RETURN:
-      // TODO: StartMoveTo(START) 진행 → 완료 시 M_DONE
-      break;
-    case M_DONE:
-      Stop();
-      break;
+
+    case M_LIFT_UP:  liftUp();  delay(600); mState = M_GO_CITY1; break;   // 상차
+
+    case M_GO_CITY1: StartGoTo(missionDest); mState = M_GO_CITY2; break;  // 도시로
+    case M_GO_CITY2: if (!navActive) { palletGoneCount = 0; dropWaitStart = millis(); mState = M_WAIT_DROP; } break;
+
+    case M_WAIT_DROP: if (palletDropped()) { BeepNonBlocking(500, 150); mState = M_LIFT_DOWN; } break;
+
+    case M_LIFT_DOWN: liftDown(); delay(600); mState = M_GO_HUB1; break;  // 하차 → 반복
   }
 }
 
 //==============================================================
 // 17. 실행 모드
 //==============================================================
-#define MODE_TEST_MOVE 0   // 검증된 targetList 좌표 주행 (기본)
-#define MODE_MISSION   1   // RFID 미션 (스텁 완성 후 전환)
-#define RUN_MODE MODE_TEST_MOVE
+#define MODE_TEST_MOVE 0   // targetList 좌표 주행 (라우팅 검증용)
+#define MODE_MISSION   1   // RFID 팔렛 미션 (실제 동작)
+#define RUN_MODE MODE_MISSION   // ← 라우팅만 보려면 MODE_TEST_MOVE 로 변경
 
 // 디버그 텔레메트리 (Serial Monitor 9600 baud). 문제 해결 후 0으로.
 #define DEBUG 1
@@ -633,28 +670,35 @@ void DebugPrint() {
 }
 
 //==============================================================
-// 18. 버튼 출발/정지 (A3, 액티브 로우, INPUT 외부풀업)
+// 18. 출발 = RFID 시작카드 / 정지 = 버튼(A3)
 //==============================================================
-void handleStartButton() {
-  if (digitalRead(pinButton) != 0) return;        // 안 눌림
-  Stop();                                          // 눌리는 순간 안전 정지
-  delay(20);                                       // 디바운스
-  if (digitalRead(pinButton) != 0) return;         // 채터링 무시
-  while (digitalRead(pinButton) == 0) delay(5);    // 손 뗄 때까지 대기
-
-  running = !running;                              // 토글
-  if (running) {
-    if (!started) {                                // 최초 1회: 시퀀스 시작
-      started = true;
-      if (RUN_MODE == MODE_TEST_MOVE) StartCurrentTarget();
-    }
-    Serial.println(F(">> START"));
-    BeepNonBlocking(880, 120);
-  } else {                                         // 다시 누르면 정지(비상정지)
-    Stop();
-    Serial.println(F(">> STOP"));
-    BeepNonBlocking(300, 200);
+bool isStartCard(byte *uid) {
+  for (int i = 0; i < 4; i++) if (uid[i] != START_CARD[i]) return false;
+  return true;
+}
+// 시작 전: 시작 카드가 태깅되면 출발
+void waitForStartCard() {
+  byte uid[4];
+  if (!readUID(uid)) return;                       // 카드 없음
+  if (isStartCard(uid)) {
+    started = true; running = true;
+    Serial.println(F(">> RFID START"));
+    BeepNonBlocking(880, 150);
+  } else {
+    Serial.println(F(">> 다른 카드 (무시)"));
+    BeepNonBlocking(200, 200);                     // 거부음
   }
+}
+// 시작 후: 버튼 = 비상정지 / 재개 토글
+void handleStopButton() {
+  if (digitalRead(pinButton) != 0) return;
+  Stop();
+  delay(20);
+  if (digitalRead(pinButton) != 0) return;
+  while (digitalRead(pinButton) == 0) delay(5);    // 손 뗄 때까지 대기
+  running = !running;
+  if (running) { Serial.println(F(">> RESUME")); BeepNonBlocking(880, 120); }
+  else         { Stop(); Serial.println(F(">> STOP")); BeepNonBlocking(300, 200); }
 }
 
 //==============================================================
@@ -674,24 +718,32 @@ void setup() {
 
   Stop();
 
+  SPI.begin();           // RFID(SPI)
+  mfrc522.PCD_Init();
+  liftServo.attach(pinLiftServo);   // 리프트 서보
+  liftDown();                       // 시작 시 리프트 내림
+
   // 시작 자세 고정
   robotPos = START;
   robotDir = START_DIR;
 
   delay(300);
   BeepNonBlocking(523, 150);
-  Serial.println(F("Jellibi AGV Base - 버튼(A3)을 누르면 출발"));
-  // 버튼 출발: setup에서 자동 시작하지 않음 (loop의 handleStartButton)
+  Serial.println(F("Jellibi AGV Base - 시작 카드를 태깅하면 출발"));
+  // 출발: RFID 시작 카드 태깅 시 (loop의 waitForStartCard)
 }
 
 void loop() {
   UpdateBuzzer();
   DebugPrint();
-  handleStartButton();                    // 버튼으로 출발/정지 토글
 
-  if (!running)     { Stop(); return; }   // 출발 대기 / 일시정지
+  if (!started) waitForStartCard();       // 시작 전: RFID 시작 카드 대기
+  else          handleStopButton();       // 시작 후: 버튼 = 정지/재개
+
+  if (!running)     { Stop(); return; }   // 대기 / 일시정지
   if (obstacleHalt) { Stop(); return; }   // 장애물 안전 정지 래치
 
-  if (RUN_MODE == MODE_TEST_MOVE) RunMoveTo();
+  RunMoveTo();                            // 주행 갱신 (navActive일 때만)
+  if (RUN_MODE == MODE_TEST_MOVE) RunTestSequence();
   else                            RunMission();
 }
