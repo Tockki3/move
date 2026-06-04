@@ -254,8 +254,8 @@ bool isStartCard(byte *uid){
 }
 
 //==================== 리프트 ====================
-void liftUp(){   liftServo.write(LIFT_UP_ANGLE); }    // 적재
-void liftDown(){ liftServo.write(LIFT_DOWN_ANGLE); }  // 하차
+void liftUp(){   liftServo.attach(pinLiftServo); liftServo.write(LIFT_UP_ANGLE);   delay(actionDelayMs); }                       // 적재: 부착·올림(운반 중 유지)
+void liftDown(){ liftServo.attach(pinLiftServo); liftServo.write(LIFT_DOWN_ANGLE); delay(actionDelayMs); liftServo.detach(); }  // 하차: 내린 뒤 서보 분리(전류↓→리셋 방지)
 
 //==================== 미션: 창고→적재→도시→하차→반복 ====================
 enum { M_TO_HUB, M_HUB_WAIT, M_LOAD, M_TO_CITY, M_CITY_WAIT, M_UNLOAD };
@@ -265,10 +265,10 @@ void runMission(){
   switch(mState){
     case M_TO_HUB:    goTo(HUB);  mState=M_HUB_WAIT;  break;   // 창고로
     case M_HUB_WAIT:  if(!navActive) mState=M_LOAD;   break;   // 도착 대기
-    case M_LOAD:      liftUp();   delay(actionDelayMs); beep(1200,100); mState=M_TO_CITY; break;  // 적재
+    case M_LOAD:      liftUp();   beep(1200,100); mState=M_TO_CITY; break;  // 적재(서보 유지)
     case M_TO_CITY:   goTo(DEST); mState=M_CITY_WAIT; break;   // 도시로
     case M_CITY_WAIT: if(!navActive) mState=M_UNLOAD; break;   // 도착 대기
-    case M_UNLOAD:    liftDown(); delay(actionDelayMs); beep(500,150);  mState=M_TO_HUB;  break;  // 하차 → 반복
+    case M_UNLOAD:    liftDown(); beep(500,150);  mState=M_TO_HUB;  break;  // 하차(서보 분리) → 반복
   }
 }
 
@@ -293,7 +293,7 @@ void setup(){
   Stop();
 
   SPI.begin(); mfrc522.PCD_Init();
-  liftServo.attach(pinLiftServo); liftDown();
+  liftDown();                       // 시작: 리프트 내림 후 서보 분리(idle 전류 0)
 
   HUB   = {0, WAREHOUSE_NO};               // 창고 N (행0)
   DEST  = {9, CITY_NO};                     // 도시 N (행9)
