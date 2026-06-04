@@ -82,6 +82,9 @@ int forwardAfterTurnTime    = 0;
 int leftTurnTime            = 420;
 int rightTurnTime           = 420;
 int halfTurnTime            = 840;
+
+// 팔렛 적재(RFID 인식 후 운반) 시 회전시간 배수 (부하로 느려져 더 돌아야 함)
+float LOADED_TURN_FACTOR = 1.15;
 int forwardAfterHalfTurnTime = 60;
 
 // 도착 교차점 중앙정렬
@@ -191,6 +194,7 @@ int   routeLen = 0;
 int   routeIdx = 0;
 bool  navActive = false;   // 주행(StartGoTo) 진행 중?
 Point currentDest = {0,0}; // 현재 주행 최종 목적지 (재경로용)
+bool  palletLoaded = false; // 팔렛 적재(RFID 인식 후 운반) 중?
 int   targetIndex  = 0;
 bool  allTargetsFinished = false;
 
@@ -356,10 +360,13 @@ void UpdateDirectionLeft()  { robotDir = leftOf(robotDir); }
 void UpdateDirectionRight() { robotDir = rightOf(robotDir); }
 void UpdateDirectionHalf()  { robotDir = (Direction)((robotDir + 2) % 4); }
 
+// 팔렛 적재 중이면 회전시간 늘림 (RFID 인식 후 운반 상태)
+int turnMs(int base) { return palletLoaded ? (int)(base * LOADED_TURN_FACTOR) : base; }
+
 void TimeTurnLeft90() {
   Forward(basePower); delay(forwardIntoCrossTime);
   Stop(); delay(60);
-  PivotTurnLeft(turnPower); delay(leftTurnTime);
+  PivotTurnLeft(turnPower); delay(turnMs(leftTurnTime));
   Stop(); delay(60);
   if (forwardAfterTurnTime > 0) { Forward(basePower); delay(forwardAfterTurnTime); Stop(); delay(60); }
   UpdateDirectionLeft();
@@ -368,7 +375,7 @@ void TimeTurnLeft90() {
 void TimeTurnRight90() {
   Forward(basePower); delay(forwardIntoCrossTime);
   Stop(); delay(60);
-  PivotTurnRight(turnPower); delay(rightTurnTime);
+  PivotTurnRight(turnPower); delay(turnMs(rightTurnTime));
   Stop(); delay(60);
   if (forwardAfterTurnTime > 0) { Forward(basePower); delay(forwardAfterTurnTime); Stop(); delay(60); }
   UpdateDirectionRight();
@@ -377,7 +384,7 @@ void TimeTurnRight90() {
 void TimeTurnHalf() {
   Forward(basePower); delay(forwardIntoCrossTime);
   Stop(); delay(80);
-  PivotTurnLeft(turnPower); delay(halfTurnTime);
+  PivotTurnLeft(turnPower); delay(turnMs(halfTurnTime));
   Stop(); delay(100);
   if (forwardAfterHalfTurnTime > 0) { Forward(basePower); delay(forwardAfterHalfTurnTime); Stop(); delay(80); }
   UpdateDirectionHalf();
@@ -700,14 +707,14 @@ void RunMission() {
       break;                                                         // 없으면 대기
     }
 
-    case M_LIFT_UP:  liftUp();  delay(actionDelayMs); mState = M_GO_CITY1; break;   // 상차
+    case M_LIFT_UP:  liftUp();  delay(actionDelayMs); palletLoaded = true;  mState = M_GO_CITY1; break;   // 상차
 
     case M_GO_CITY1: StartGoTo(missionDest); mState = M_GO_CITY2; break;  // 도시로
     case M_GO_CITY2: if (!navActive) { palletGoneCount = 0; dropWaitStart = millis(); mState = M_WAIT_DROP; } break;
 
     case M_WAIT_DROP: if (palletDropped()) { BeepNonBlocking(500, 150); mState = M_LIFT_DOWN; } break;
 
-    case M_LIFT_DOWN: liftDown(); delay(actionDelayMs); mState = M_GO_HUB1; break;  // 하차 → 반복
+    case M_LIFT_DOWN: liftDown(); delay(actionDelayMs); palletLoaded = false; mState = M_GO_HUB1; break;  // 하차 → 반복
   }
 }
 
