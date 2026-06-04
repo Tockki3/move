@@ -130,13 +130,17 @@ Point warehousePos[8] = {           // 창고1~8 = 열1~8
   {0,1},{0,2},{0,3},{0,4},{0,5},{0,6},{0,7},{0,8}
 };
 
-// --- 출발지 / 허브 창고 (※ 대회 시작 시 공지된 값으로 수정) ---
-// 출발지는 좌측(열0)·우측(열9) 또는 창고/도시 스텁 어디든 가능
-Point     START     = {1, 0};    // TODO: 공지된 출발 (예: 1A 왼쪽 = (1,0))
-Direction START_DIR = EAST;      // TODO: 출발 향(좌=EAST, 우=WEST, 창고=SOUTH, 도시=NORTH)
-Point     HUB       = {0, 1};    // TODO: 상차 허브 창고 (예: 창고1 = (0,1))
+// --- 테스트 경로: D출발 → 창고3 → 세종 → 창고3 → 반복 ---
+Point     START     = {4, 0};    // D출발 (좌측 스텁, 행D=row4) → 격자 안쪽 EAST
+Direction START_DIR = EAST;      // 좌측출발이라 EAST (우측출발이면 WEST)
+Point     HUB       = {0, 3};    // 창고3 (행0, 열3) = 물류 받는 곳
 
-Point     robotPos = {1, 0};
+// 테스트 옵션
+#define TEST_FIXED_DEST  1       // 1: 목적지 고정(FIXED_DEST), 0: RFID로 결정
+#define TEST_SKIP_PALLET 1       // 1: 팔렛 없이 자동 픽업(경로테스트), 0: 창고에서 RFID 대기
+Point     FIXED_DEST = {9, 3};   // 세종 (행9, 열3) = 하차 도시
+
+Point     robotPos = {4, 0};
 Direction robotDir = EAST;
 
 bool inBounds(Point p) {
@@ -697,10 +701,11 @@ void RunMission() {
     case M_GO_HUB1:  StartGoTo(HUB); mState = M_GO_HUB2; break;       // 창고로
     case M_GO_HUB2:  if (!navActive) { liftDown(); mState = M_READ_PALLET; } break;
 
-    case M_READ_PALLET: {                                            // 팔렛 읽기
+    case M_READ_PALLET: {                                            // 팔렛 받기
       byte uid[4];
-      if (readUID(uid)) {
-        missionDest = lookupCity(uid);                               // 팔렛 → 도시
+      bool got = TEST_SKIP_PALLET ? true : readUID(uid);             // 테스트: 자동 / 실제: RFID 대기
+      if (got) {
+        missionDest = TEST_FIXED_DEST ? FIXED_DEST : lookupCity(uid);// 테스트: 세종 고정
         BeepNonBlocking(1200, 100);
         mState = M_LIFT_UP;
       }
