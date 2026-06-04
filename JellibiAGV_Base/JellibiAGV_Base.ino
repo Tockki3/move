@@ -92,7 +92,7 @@ int turnIgnoreTime = 400;
 
 // 장애물 (전방 IR: 값이 기준보다 작으면 장애물 / A1 기준 보정값)
 // ※ 이 로봇 전방센서 미보정 → 오작동으로 잠시 OFF. 보정 후 1로 복구.
-#define USE_OBSTACLE 0
+#define USE_OBSTACLE 1
 int obstacleThreshold = 980;
 
 //==============================================================
@@ -182,11 +182,12 @@ Point currentTarget;
 Point targetList[] = { {0,1}, {9,8}, {0,4} };
 int   targetCount  = 3;
 
-// 스텁 안전 라우팅: 목적지까지 웨이포인트 (세로→가로→세로, 최대 4점)
-Point routeWP[4];
+// 라우팅: 목적지까지 웨이포인트 (BFS 우회 시 다점)
+Point routeWP[16];
 int   routeLen = 0;
 int   routeIdx = 0;
 bool  navActive = false;   // 주행(StartGoTo) 진행 중?
+Point currentDest = {0,0}; // 현재 주행 최종 목적지 (재경로용)
 int   targetIndex  = 0;
 bool  allTargetsFinished = false;
 
@@ -426,12 +427,78 @@ int planRoute(Point from, Point to, Point wp[]) {
   if (!samePoint(to, gB))   wp[n++] = to;   // 스텁 탈출
   return n;
 }
+//---- 격자 그래프 + 장애물 회피 경로탐색(BFS) ----
+bool isInterior(Point p) {
+  return p.row >= GRID_ROW_MIN && p.row <= GRID_ROW_MAX &&
+         p.col >= GRID_COL_MIN && p.col <= GRID_COL_MAX;
+}
+bool isNode(Point p) {                          // 유효 노드(격자/스텁)?
+  if (isInterior(p)) return true;
+  if (p.row == 0 && p.col >= 1 && p.col <= 8) return true;  // 창고
+  if (p.row == 9 && p.col >= 1 && p.col <= 8) return true;  // 도시
+  if (p.col == 0 && p.row >= 1 && p.row <= 8) return true;  // 좌측출발
+  if (p.col == 9 && p.row >= 1 && p.row <= 8) return true;  // 우측출발
+  return false;
+}
+bool edgeOK(Point a, Point b) {                 // 두 인접칸이 선으로 이어졌나
+  return isNode(a) && isNode(b) && (isInterior(a) || isInterior(b));
+}
+
+// 차단된 변(장애물)
+#define MAX_BLOCKED 12
+byte blkA[MAX_BLOCKED], blkB[MAX_BLOCKED];
+int  blkCount = 0;
+void addBlocked(Point a, Point b) {
+  if (blkCount < MAX_BLOCKED) { blkA[blkCount]=a.row*10+a.col; blkB[blkCount]=b.row*10+b.col; blkCount++; }
+}
+bool isBlocked(Point a, Point b) {
+  byte ia=a.row*10+a.col, ib=b.row*10+b.col;
+  for (int i=0;i<blkCount;i++)
+    if ((blkA[i]==ia&&blkB[i]==ib)||(blkA[i]==ib&&blkB[i]==ia)) return true;
+  return false;
+}
+
+// BFS 경로탐색(차단변 회피) → 방향전환점만 웨이포인트로 압축
+byte bfsPrev[100], bfsQ[100];
+int planRouteBFS(Point from, Point to, Point wp[]) {
+  for (int i = 0; i < 100; i++) bfsPrev[i] = 255;
+  int qh = 0, qt = 0;
+  byte s = from.row*10 + from.col, g = to.row*10 + to.col;
+  bfsQ[qt++] = s; bfsPrev[s] = s;
+  const int DR[4] = {-1,0,1,0}, DC[4] = {0,1,0,-1};
+  while (qh < qt) {
+    byte cur = bfsQ[qh++];
+    if (cur == g) break;
+    Point cp = {cur/10, cur%10};
+    for (int d = 0; d < 4; d++) {
+      Point np = {cp.row+DR[d], cp.col+DC[d]};
+      if (np.row<0||np.row>9||np.col<0||np.col>9) continue;
+      byte ni = np.row*10 + np.col;
+      if (bfsPrev[ni] != 255) continue;         // 방문함
+      if (!edgeOK(cp, np) || isBlocked(cp, np)) continue;
+      bfsPrev[ni] = cur; bfsQ[qt++] = ni;
+    }
+  }
+  if (bfsPrev[g] == 255) return 0;              // 경로 없음
+  int len = 0; byte c = g;                      // 역추적(goal→start)
+  while (true) { bfsQ[len++] = c; if (c == s) break; c = bfsPrev[c]; }
+  int n = 0; wp[n++] = from;                    // start
+  for (int i = len-2; i >= 1; i--) {            // 방향 전환점만
+    int d1r=(bfsQ[i]/10)-(bfsQ[i+1]/10), d1c=(bfsQ[i]%10)-(bfsQ[i+1]%10);
+    int d2r=(bfsQ[i-1]/10)-(bfsQ[i]/10), d2c=(bfsQ[i-1]%10)-(bfsQ[i]%10);
+    if ((d1r!=d2r || d1c!=d2c) && n < 15) { Point t={bfsQ[i]/10, bfsQ[i]%10}; wp[n++]=t; }
+  }
+  wp[n++] = to;                                 // goal
+  return n;
+}
+
 void StartGoTo(Point dest) {
   navActive = true;
-  routeLen = planRoute(robotPos, dest, routeWP);
-  routeIdx = 1;                                // wp[0] = 현재 위치
-  if (routeIdx < routeLen) StartMoveTo(routeWP[routeIdx]);
-  else moveState = 5;                          // 이미 도착(같은 칸) → 다음으로
+  currentDest = dest;
+  routeLen = (blkCount == 0) ? planRoute(robotPos, dest, routeWP)
+                             : planRouteBFS(robotPos, dest, routeWP);  // 장애물 있으면 우회
+  if (routeLen >= 2) { routeIdx = 1; StartMoveTo(routeWP[routeIdx]); }
+  else { navActive = false; Stop(); obstacleHalt = true; BeepNonBlocking(200, 600); } // 경로 없음
 }
 void RunMoveTo() {
   if (!navActive) { Stop(); return; }   // 활성 경로 없으면 정지
@@ -510,28 +577,30 @@ bool CheckObstacle() {
 #endif
 }
 
-// 경계 안전 회피: 안쪽(inBounds) 방향을 고른다.
-// ※ 실제 우회 "모션"은 맵 칸 간격에 맞춰 튜닝 필요 → 현재는 안전 정지(스텁).
+// 정면 장애물: 막힌 변 기록 → 직전 교차점으로 후진 → 다른 경로(BFS)로 우회
 void handleObstacle() {
   Stop();
-  BeepNonBlocking(400, 300);
+  BeepNonBlocking(400, 200);
 
-  Point sideRight = stepCell(robotPos, rightOf(robotDir), 1);
-  Point sideLeft  = stepCell(robotPos, leftOf(robotDir),  1);
+  // 1) 이번 leg에서 마지막 지난 교차점(현재 셀)과 막힌 변 기록
+  Point cur = stepCell(robotPos, robotDir, lineCounter);
+  Point nx  = stepCell(cur, robotDir, 1);
+  addBlocked(cur, nx);
 
-  int side = 0;                 // 0 없음, 1 우, 2 좌
-  if      (inBounds(sideRight)) side = 1;
-  else if (inBounds(sideLeft))  side = 2;
+  // 2) 후진 복귀: 180° 후 직전 교차점까지 라인트레이스
+  TimeTurnHalf();                         // robotDir 반전
+  StartDoLineTrace(1);
+  unsigned long t0 = millis();
+  while (!isLineTraceFinished && millis() - t0 < 4000) {  // 안전 타임아웃
+    UpdateLineCounter();
+    if (lineCounter >= targetLineCount) { FinishLineTraceWithCentering(); break; }
+    LineTracePControl();
+  }
+  Stop();
+  robotPos = cur;                         // 직전 교차점에 위치 (robotDir은 반전됨)
 
-  // TODO(목차 17·18): 아래를 실제 우회 모션으로 구현
-  //   runAvoidPath(side);                          // 우회 주행
-  //   robotPos = stepCell(robotPos, robotDir, 2);  // 장애물 너머 칸으로 위치 갱신
-  //   ResetLineCounter();                          // 복귀 후 카운터 초기화
-  //   return;  // MoveTo가 남은 경로 재계산
-  (void)side;
-
-  // 회피 구현 전까지: 안전 정지 래치
-  obstacleHalt = true;
+  // 3) 목적지로 BFS 재경로 (차단 회피)
+  StartGoTo(currentDest);
 }
 
 //==============================================================
