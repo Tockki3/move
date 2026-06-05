@@ -106,8 +106,9 @@ void handleObstacle();
 
 // ★ 팔렛 UID → 목적지 도시  (각 팔렛을 RfidTest로 읽어 UID 입력)
 //   도시 열: 1서울 2인천 3세종 4대전 5대구 6광주 7부산 8제주
+//   ※ 한 도시에 여러 UID OK — 같은 좌표로 줄을 더 추가하면 됨(개수 자유)
 struct CityTag { byte uid[4]; Point pos; };
-CityTag cityTable[8] = {
+CityTag cityTable[] = {
   { {0,0,0,0}, {9,1} },  // 서울
   { {0,0,0,0}, {9,2} },  // 인천
   { {0,0,0,0}, {9,3} },  // 세종
@@ -116,7 +117,9 @@ CityTag cityTable[8] = {
   { {0,0,0,0}, {9,6} },  // 광주
   { {0,0,0,0}, {9,7} },  // 부산
   { {0,0,0,0}, {9,8} },  // 제주
+  // 예) 같은 도시 추가 UID:  { {0xAA,0xBB,0xCC,0xDD}, {9,3} },  // 세종(팔렛2)
 };
+#define CITY_N ((int)(sizeof(cityTable)/sizeof(cityTable[0])))
 
 //==================== RFID / 서보 ====================
 MFRC522 mfrc522(pinRfidSS, pinRfidRST);
@@ -379,7 +382,7 @@ bool isStartCard(byte *uid){
   return true;
 }
 Point lookupCity(byte *uid){             // 팔렛 UID → 도시 좌표
-  for(int i=0;i<8;i++){
+  for(int i=0;i<CITY_N;i++){
     bool eq=true;
     for(int b=0;b<4;b++) if(cityTable[i].uid[b]!=uid[b]) eq=false;
     if(eq) return cityTable[i].pos;
